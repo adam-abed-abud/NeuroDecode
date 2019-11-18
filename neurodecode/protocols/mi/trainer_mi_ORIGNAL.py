@@ -30,29 +30,22 @@ import sys
 import imp
 import mne
 import mne.io
-import pycnbi
-import timeit
 import platform
-import traceback
 import numpy as np
 import multiprocessing as mp
 import sklearn.metrics as skmetrics
-import pycnbi.utils.q_common as qc
-import pycnbi.utils.pycnbi_utils as pu
-import pycnbi.decoder.features as features
-from mne import Epochs, pick_types
+import neurodecode.utils.q_common as qc
+import neurodecode.utils.pycnbi_utils as pu
+import neurodecode.decoder.features as features
 from builtins import input
-from IPython import embed  # for debugging
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.ensemble import GradientBoostingClassifier
-from sklearn.ensemble import AdaBoostClassifier
-from sklearn.neural_network import MLPClassifier
 from xgboost import XGBClassifier
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis as LDA
-from pycnbi import logger, add_logger_handler
-from pycnbi.decoder.rlda import rLDA
-from pycnbi.triggers.trigger_def import trigger_def
-from pycnbi.gui.streams import redirect_stdout_to_queue
+from neurodecode import logger
+from neurodecode.decoder.rlda import rLDA
+from neurodecode.triggers.trigger_def import trigger_def
+from neurodecode.gui.streams import redirect_stdout_to_queue
 
 # scikit-learn old version compatibility
 try:
@@ -63,14 +56,6 @@ except ImportError:
     SKLEARN_OLD = True
 mne.set_log_level('ERROR')
 os.environ['OMP_NUM_THREADS'] = '1' # actually improves performance for multitaper
-
-
-def load_config(cfg_file):
-    cfg_file = qc.forward_slashify(cfg_file)
-    if not (os.path.exists(cfg_file) and os.path.isfile(cfg_file)):
-        logger.error('%s cannot be loaded.' % os.path.realpath(cfg_file))
-        raise IOError
-    return imp.load_source(cfg_file, cfg_file)
 
 def check_config(cfg):
     critical_vars = {
@@ -375,13 +360,6 @@ def balance_tpr(cfg, featdata):
         cls = RandomForestClassifier(n_estimators=cfg.CLASSIFIER['RF']['trees'], max_features='auto',
                                      max_depth=cfg.CLASSIFIER['RF']['depth'], n_jobs=cfg.N_JOBS, random_state=cfg.CLASSIFIER['RF']['seed'],
                                      oob_score=False, class_weight='balanced_subsample')
-
-    elif selected_classifier == 'NN':
-        cls = MLPClassifier(solver='lbfgs', alpha=1e-5, hidden_layer_sizes=(1,1), random_state=666)    
-    elif selected_classifier == 'Ada':
-        cls = AdaBoostClassifier(algorithm='SAMME.R', base_estimator=None,
-        learning_rate=1.0, n_estimators=100, random_state=0)
-
     elif selected_classifier == 'LDA':
         cls = LDA()
     elif selected_classifier == 'rLDA':
@@ -537,20 +515,12 @@ def cross_validate(cfg, featdata, cv_file=None):
                                          random_state=cfg.CLASSIFIER['GB']['seed'], max_features='sqrt', verbose=0, warm_start=False)
     elif selected_classifier == 'XGB':
         cls = XGBClassifier(loss='deviance', learning_rate=cfg.CLASSIFIER['XGB']['learning_rate'], presort='auto',
-                                         n_estimators=cfg.CLASSIFIER['XGB']['trees'], subsample=1.0, max_depth=cfg.CLASSIFIER['XGB']['depth'], 
-                                         random_state=cfg.CLASSIFIER['XGB']['seed'], max_features='sqrt', verbose=0, warm_start=False)
+                                         n_estimators=cfg.CLASSIFIER['XGB']['trees'], subsample=1.0, max_depth=cfg.CLASSIFIER['XGB']['depth'],
+                                         random_state=cfg.CLASSIFIER['XGB'], max_features='sqrt', verbose=0, warm_start=False)
     elif selected_classifier == 'RF':
         cls = RandomForestClassifier(n_estimators=cfg.CLASSIFIER['RF']['trees'], max_features='auto',
                                      max_depth=cfg.CLASSIFIER['RF']['depth'], n_jobs=cfg.N_JOBS, random_state=cfg.CLASSIFIER['RF']['seed'],
                                      oob_score=False, class_weight='balanced_subsample')
-
-    elif selected_classifier == 'NN':
-        cls = MLPClassifier(solver='lbfgs', alpha=1e-5, hidden_layer_sizes=(1,1), random_state=1)    
-    
-    elif selected_classifier == 'Ada':
-        cls = AdaBoostClassifier(algorithm='SAMME.R', base_estimator=None,
-        learning_rate=0.1, n_estimators=100, random_state=0)
-    
     elif selected_classifier == 'LDA':
         cls = LDA()
     elif selected_classifier == 'rLDA':
@@ -663,19 +633,12 @@ def train_decoder(cfg, featdata, feat_file=None):
     elif selected_classifier == 'XGB':
         cls = XGBClassifier(loss='deviance', learning_rate=cfg.CLASSIFIER[selected_classifier]['learning_rate'],
                                          n_estimators=cfg.CLASSIFIER[selected_classifier]['trees'], subsample=1.0, max_depth=cfg.CLASSIFIER[selected_classifier]['depth'],
-                                         random_state=cfg.CLASSIFIER[selected.classifier]['seed'], max_features='sqrt', verbose=0, warm_start=False,
+                                         random_state=cfg.GB['seed'], max_features='sqrt', verbose=0, warm_start=False,
                                          presort='auto')
     elif selected_classifier == 'RF':
         cls = RandomForestClassifier(n_estimators=cfg.CLASSIFIER[selected_classifier]['trees'], max_features='auto',
                                      max_depth=cfg.CLASSIFIER[selected_classifier]['depth'], n_jobs=cfg.N_JOBS, random_state=cfg.CLASSIFIER[selected_classifier]['seed'],
                                      oob_score=False, class_weight='balanced_subsample')
-
-    elif selected_classifier == 'NN':
-        cls = MLPClassifier(solver='lbfgs', alpha=1e-5, hidden_layer_sizes=(1, 1), random_state=1)    
-    elif selected_classifier == 'Ada':
-        cls = AdaBoostClassifier(algorithm='SAMME.R', base_estimator=None,
-        learning_rate=1.0, n_estimators=100, random_state=0)
-
     elif selected_classifier == 'LDA':
         cls = LDA()
     elif selected_classifier == 'rLDA':
@@ -779,39 +742,51 @@ def train_decoder(cfg, featdata, feat_file=None):
 
 
 # for batch scripts
-def batch_run(cfg_file):
-    cfg = load_config(cfg_file)
+def batch_run(cfg_module):
+    cfg = pu.load_config(cfg_module)
     cfg = check_config(cfg)
     run(cfg, interactive=True)
 
-def run(cfg, queue=None, interactive=False, cv_file=None, feat_file=None):
+def run(cfg, state=mp.Value('i', 1), queue=None, interactive=False, cv_file=None, feat_file=None, logger=logger):
 
-    redirect_stdout_to_queue(queue)
+    redirect_stdout_to_queue(logger, queue, 'INFO')
 
+    # add tdef object
     cfg.tdef = trigger_def(cfg.TRIGGER_FILE)
 
     # Extract features
+    if not state.value:
+        sys.exit(-1)
     featdata = features.compute_features(cfg)
 
     # Find optimal threshold for TPR balancing
     #balance_tpr(cfg, featdata)
 
     # Perform cross validation
+    if not state.value:
+        sys.exit(-1)
+
     if cfg.CV_PERFORM[cfg.CV_PERFORM['selected']] is not None:
         cross_validate(cfg, featdata, cv_file=cv_file)
 
     # Train a decoder
+    if not state.value:
+        sys.exit(-1)
+
     if cfg.EXPORT_CLS is True:
         train_decoder(cfg, featdata, feat_file=feat_file)
+
+    with state.get_lock():
+        state.value = 0
 
 
 
 if __name__ == '__main__':
     # Load parameters
     if len(sys.argv) < 2:
-        cfg_file = input('Config file name? ')
+        cfg_module = input('Config module name? ')
     else:
-        cfg_file = sys.argv[1]
-    batch_run(cfg_file)
+        cfg_module = sys.argv[1]
+    batch_run(cfg_module)
 
     logger.info('Finished.')
